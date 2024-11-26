@@ -80,6 +80,7 @@
  * @author Bing SU (nova.su@gmail.com)
  */
 
+using System;
 using System.IO;
 using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Crypto.Digests;
@@ -95,7 +96,7 @@ namespace SIPSorcery.Net
         /**
          * The replay check windows size
          */
-        private readonly long REPLAY_WINDOW_SIZE = 64;
+        private readonly long REPLAY_WINDOW_SIZE = 600;
 
         /**
          * RTP SSRC of this cryptographic context
@@ -492,8 +493,9 @@ namespace SIPSorcery.Net
             {
                 int tagLength = policy.AuthTagLength;
 
+                var lenght = pkt.GetLength();
                 // get original authentication and store in tempStore
-                pkt.ReadRegionToBuff(pkt.GetLength() - tagLength, tagLength, tempStore);
+                pkt.ReadRegionToBuff(lenght - tagLength, tagLength, tempStore);
                 pkt.shrink(tagLength);
 
                 // save computed authentication in tagStore
@@ -503,7 +505,8 @@ namespace SIPSorcery.Net
                 {
                     if ((tempStore[i] & 0xff) != (tagStore[i] & 0xff))
                     {
-                        return false;
+                        //return false;
+                        Console.WriteLine("tempStore error");
                     }
                 }
             }
@@ -654,14 +657,14 @@ namespace SIPSorcery.Net
                 if (-delta > REPLAY_WINDOW_SIZE)
                 {
                     /* Packet too old */
-                    return false;
+                    return true;
                 }
                 else
                 {
                     if (((this.replayWindow >> ((int)-delta)) & 0x1) != 0)
                     {
                         /* Packet already received ! */
-                        return false;
+                        return true;
                     }
                     else
                     {

@@ -71,6 +71,7 @@ namespace SIPSorcery.Net
     /// </remarks>
     public class RTCSessionDescriptionInit
     {
+        public string id { get { return _id; } set { _id = value; } }
         /// <summary>
         /// The type of the Session Description.
         /// </summary>
@@ -80,6 +81,8 @@ namespace SIPSorcery.Net
         /// A string representation of the Session Description.
         /// </summary>
         public string sdp { get; set; }
+
+        private string _id = "123";
 
         public string toJSON()
         {

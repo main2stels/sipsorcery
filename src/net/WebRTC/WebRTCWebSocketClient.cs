@@ -45,6 +45,8 @@ namespace SIPSorcery.Net
         private RTCPeerConnection _pc;
         public RTCPeerConnection RTCPeerConnection => _pc;
 
+        private ClientWebSocket _ws;
+
         /// <summary>
         /// Default constructor.
         /// </summary>
@@ -75,6 +77,7 @@ namespace SIPSorcery.Net
             logger.LogDebug($"websocket-client attempting to connect to {_webSocketServerUri}.");
 
             var webSocketClient = new ClientWebSocket();
+            _ws = webSocketClient;
             // As best I can tell the point of the CreateClientBuffer call is to set the size of the internal
             // web socket buffers. The return buffer seems to be for cases where direct access to the raw
             // web socket data is desired.
@@ -82,12 +85,24 @@ namespace SIPSorcery.Net
             CancellationTokenSource connectCts = new CancellationTokenSource();
             connectCts.CancelAfter(WEB_SOCKET_CONNECTION_TIMEOUT_MS);
             await webSocketClient.ConnectAsync(_webSocketServerUri, connectCts.Token).ConfigureAwait(false);
+            Thread.Sleep(1000);
 
             if (webSocketClient.State == WebSocketState.Open)
             {
                 logger.LogDebug($"websocket-client starting receive task for server {_webSocketServerUri}.");
 
+                _pc.onicecandidate += (iceCandidate) =>
+                {
+                    if (_pc.signalingState == RTCSignalingState.have_remote_offer ||
+                        _pc.signalingState == RTCSignalingState.stable)
+                    {
+                        //Task.Run(() => webSocketClient.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(iceCandidate.toJSON())), WebSocketMessageType.Text, true, cancellation)).ConfigureAwait(false);
+                    }
+                };
+
                 _ = Task.Run(() => ReceiveFromWebSocket(_pc, webSocketClient, cancellation)).ConfigureAwait(false);
+
+
             }
             else
             {
@@ -114,7 +129,7 @@ namespace SIPSorcery.Net
                 if (posn > 0)
                 {
                     var jsonMsg = Encoding.UTF8.GetString(buffer, 0, posn);
-                    string jsonResp = await OnMessage(jsonMsg, pc);
+                    string jsonResp = await OnMessage(jsonMsg, pc, ws);
 
                     if (jsonResp != null)
                     {
@@ -128,8 +143,25 @@ namespace SIPSorcery.Net
             logger.LogDebug($"websocket-client receive loop exiting.");
         }
 
-        private async Task<string> OnMessage(string jsonStr, RTCPeerConnection pc)
+        public void SendRequest(CancellationToken ct)
         {
+            var str = TinyJson.JSONWriter.ToJson(new { id = "123", type = "request" });
+            _ws.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(str)), WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+        }
+
+        private async Task<string> OnMessage(string jsonStr, RTCPeerConnection pc, ClientWebSocket ws)
+        {
+            if(jsonStr.Contains("partner connect"))
+            {
+                //var offerSdp = _pc.createOffer(null);
+                //await _pc.setLocalDescription(offerSdp).ConfigureAwait(false);
+
+                //logger.LogDebug($"Sending SDP offer to client.");
+
+                //return offerSdp.toJSON();
+                //return TinyJson.JSONWriter.ToJson(new { id = "123", type = "request" });
+            }
+
             if (RTCIceCandidateInit.TryParse(jsonStr, out var iceCandidateInit))
             {
                 logger.LogDebug("Got remote ICE candidate.");
