@@ -3,6 +3,9 @@ using System.Collections.Generic;
 using System.Text;
 using System.Linq;
 using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
+using Org.BouncyCastle.Bcpg;
+using Org.BouncyCastle.Ocsp;
 
 namespace SIPSorcery.net.AL
 {
@@ -18,10 +21,13 @@ namespace SIPSorcery.net.AL
         public Action<ushort> FinalPacketDetected;
 
         public Frame PreviousFrame { get; private set; }
+        public Frame NextFrame { get; private set; }
 
         public uint TimeFirstPacketReceiveMs { get; private set; }
 
         public ushort MinSeq { get { return _frameMinSeq; } }
+
+        private VideoCodecsEnum _codec;
 
         private int _frameNumber;
 
@@ -42,12 +48,14 @@ namespace SIPSorcery.net.AL
 
         private bool _frameIsAssembled = false;
         private bool _isDisposed = false;
+        private bool _isFindMarckerBit = false;
 
-        public Frame(RTPPacket packet, ushort? startSeqNum, Frame previousFrame, long frameId, uint timeMs)
+        public Frame(RTPPacket packet, ushort? startSeqNum, Frame previousFrame, long frameId, uint timeMs, VideoCodecsEnum codec)
         {
             FrameId = frameId;
             _lastPacketTimeMs = timeMs;
             TimeFirstPacketReceiveMs = timeMs;
+            _codec = codec;
 
             _frameMinSeq = packet.Header.SequenceNumber;
             _frameMaxSeq = packet.Header.SequenceNumber;
@@ -121,32 +129,127 @@ namespace SIPSorcery.net.AL
                 _packets[seqNum] = packet;
             }
 
-            CheckFinalPacket(packet);
 
             if (_frameMinSeq > seqNum)
             {
                 _frameMinSeq = seqNum;
 
                 PreviousFrame?.NextFrameSendMinSeq(_frameMinSeq);
+
+                if(_firstPacketNumber > seqNum)
+                {
+                    SetFirstPacketNumber(seqNum);
+                }
             }
 
             if (_frameMaxSeq < seqNum)
             {
                 _frameMaxSeq = seqNum;
+
+                if(_finalPacketNumber != null)
+                {
+                    if(_finalPacketNumber < seqNum)
+                    {
+                        SetFinalPacketNumber(seqNum);
+                    }
+                }
             }
+
+            CheckFinalPacket(packet);
         }
 
+
+        private List<RTPPacket> _packetsOverMarkerBit = new List<RTPPacket>();
         private void CheckFinalPacket(RTPPacket packet)
         {
-            if (packet.Header.MarkerBit > 0)
+            
+            if (packet.Header.MarkerBit > 0 && _codec == VideoCodecsEnum.H264)
             {
-                SetFinalPacketNumber(packet.Header.SequenceNumber);
-                FinalPacketDetected?.Invoke((ushort)_finalPacketNumber);
+                if (_codec == VideoCodecsEnum.H264)
+                {
+                    SetFinalPacketNumber(packet.Header.SequenceNumber);
+                    FinalPacketDetected?.Invoke((ushort)_finalPacketNumber);
+                }
+
+
+                //todo: hz
+                //if(_packetsOverMarkerBit.Count > 0)
+                //{
+                //    Console.WriteLine($"OverMarkerbits for Frame {FrameId}");
+                //}
+
+                //_isFindMarckerBit = true;
             }
-            else if (_rangeDetected)
+
+            if (_rangeDetected)
             {
-                _rangePackets[GetPacketRange(packet.Header.SequenceNumber, (ushort)_firstPacketNumber)] = packet;
+                try
+                {
+                    if(packet.Header.SequenceNumber < _firstPacketNumber)
+                    {
+                        Console.WriteLine("Force range detected");
+                        RangeDetected(true);
+                    }
+
+                    _rangePackets[GetPacketRange(packet.Header.SequenceNumber, (ushort)_firstPacketNumber)] = packet;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("CheckFinalPacket ERROR");
+                    RangeDetected(true);
+                }
+
+                //var packetRange = GetPacketRange(packet.Header.SequenceNumber, (ushort)_finalPacketNumber);
+                //if (packetRange > 0)
+                //{
+                //    if (_packetsOverMarkerBit.Count > 0)
+                //    {
+                //        Console.WriteLine($"OverMarkerbits!! {FrameId}, find marker bit: {_isFindMarckerBit}");
+                //        foreach(var f in _packets)
+                //        {
+                //            Console.Write($"{f.Key} {f.Value.Header.MarkerBit} ");
+                //        }
+                //        Console.Write($"\n");
+                //    }
+                //    if (_packetsOverMarkerBit.Count > 0)
+                //    {
+                //        _rangeDetected = false;
+                //        _finalPacketNumber = null;
+                //    }
+                //    _packetsOverMarkerBit.Add(packet);
+                //}
+                //else
+                //{
+                //    try
+                //    {
+                //        _rangePackets[GetPacketRange(packet.Header.SequenceNumber, (ushort)_firstPacketNumber)] = packet;
+                //    }
+                //    catch (Exception ex)
+                //    {
+                //        Console.WriteLine("CheckFinalPacket ERROR");
+                //    }
+                //}
+
+                
+                
                 //Console.WriteLine($"Запоздал: {packet.Header.SequenceNumber}");
+            }
+
+            if(_nextFrameMinSeq != null && _codec != VideoCodecsEnum.H264)
+            {
+                var nextFS = (ushort)_nextFrameMinSeq;
+
+                var range = GetPacketRange(packet.Header.SequenceNumber, nextFS);
+
+                if(range == 1)
+                {
+                    if (_finalPacketNumber != null)
+                    {
+                        SetFinalPacketNumber(packet.Header.SequenceNumber);
+                        FinalPacketDetected?.Invoke((ushort)_finalPacketNumber);
+                        Console.WriteLine($"SetFinalPacketNumber {FrameId} CheckFinalPacket");
+                    }
+                }
             }
         }
 
@@ -160,18 +263,18 @@ namespace SIPSorcery.net.AL
         private void SetFinalPacketNumber(ushort value)
         {
             _finalPacketNumber = value;
-            RangeDetected();
+            RangeDetected(true);
         }
 
         private void SetFirstPacketNumber(ushort value)
         {
             _firstPacketNumber = value;
-            RangeDetected();
+            RangeDetected(true);
         }
 
-        private void RangeDetected()
+        private void RangeDetected(bool force = false)
         {
-            if (_rangeDetected)
+            if (_rangeDetected && !force)
             {
                 return;
             }
@@ -226,6 +329,7 @@ namespace SIPSorcery.net.AL
 
         private int GetRengeLenght()
         {
+            return GetPacketRange((ushort)_finalPacketNumber, (ushort)_firstPacketNumber) + 1;
             if (_finalPacketNumber >= _firstPacketNumber)
             {
                 return (ushort)_finalPacketNumber - (ushort)_firstPacketNumber + 1;
@@ -282,8 +386,28 @@ namespace SIPSorcery.net.AL
 
                             if (timeMs - nack.SendTimeMs > GetNackResendLatency())
                             {
-                                Console.WriteLine($"nack reSend: {FrameId}id. {missPacket}, send count {nack.SendCount}");
-                                lostPackets.Add((ushort)missPacket);
+                                //Console.WriteLine($"nack reSend: {FrameId}id. {missPacket}, send count {nack.SendCount}");
+                                //lostPackets.Add((ushort)missPacket);
+
+                                var seq = (ushort)missPacket;
+
+                                if (_nextFrameMinSeq != null)
+                                {
+                                    if (Compare(seq, (ushort)_nextFrameMinSeq))
+                                    {
+                                        Console.WriteLine($"nack reSend: {FrameId}id. {seq}, send count {nack.SendCount}");
+                                        lostPackets.Add(seq);
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine("Drop nack for next frame");
+                                    }
+                                }
+                                else
+                                {
+                                    Console.WriteLine($"nack reSend: {FrameId}id. {seq}, send count {nack.SendCount}");
+                                    lostPackets.Add(seq);
+                                }
                             }
                         }
                         //Console.WriteLine($"packet {i + _firstPacketNumber} lost");
@@ -359,9 +483,25 @@ namespace SIPSorcery.net.AL
 
                             if (timeMs - nack.SendTimeMs > 100)
                             {
-                                Console.WriteLine($"nack reSend: {FrameId}id. {(ushort)(i + minSeq)}, send count {nack.SendCount}");
-                                lostPackets.Add((ushort)(ushort)(i + minSeq));
+                                var seq = (ushort)(i + minSeq);
 
+                                if (_nextFrameMinSeq != null)
+                                {
+                                    if (Compare(seq, (ushort)_nextFrameMinSeq))
+                                    {
+                                        Console.WriteLine($"nack reSend: {FrameId}id. {seq}, send count {nack.SendCount}");
+                                        lostPackets.Add(seq);
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine("Drop nack for next frame");
+                                    }
+                                }
+                                else
+                                {
+                                    Console.WriteLine($"nack reSend: {FrameId}id. {seq}, send count {nack.SendCount}");
+                                    lostPackets.Add(seq);
+                                }
                             }
                         }
                     }
@@ -388,6 +528,39 @@ namespace SIPSorcery.net.AL
         public void NextFrameSendMinSeq(ushort seq)
         {
             _nextFrameMinSeq = seq;
+
+            //if(_finalPacketNumber == null)
+            //{
+            //    ushort finalPacketSeq = 0;
+
+            //    if(seq - 1 > 0)
+            //    {
+            //        finalPacketSeq = (ushort)(seq - 1);
+            //    }
+            //    else
+            //    {
+            //        finalPacketSeq = ushort.MaxValue;
+            //    }
+
+            //    //Console.WriteLine($"SetFinalPacketNumber {FrameId} NextFrameSendMinSeq");
+            //    SetFinalPacketNumber(finalPacketSeq);
+            //    FinalPacketDetected?.Invoke((ushort)_finalPacketNumber);
+            //}
+
+            ushort finalPacketSeq = 0;
+
+            if (seq - 1 > 0)
+            {
+                finalPacketSeq = (ushort)(seq - 1);
+            }
+            else
+            {
+                finalPacketSeq = ushort.MaxValue;
+            }
+
+            //Console.WriteLine($"SetFinalPacketNumber {FrameId} NextFrameSendMinSeq");
+            SetFinalPacketNumber(finalPacketSeq);
+            FinalPacketDetected?.Invoke((ushort)_finalPacketNumber);
         }
 
         public void SetPreviousFrame(Frame pf)
@@ -408,19 +581,56 @@ namespace SIPSorcery.net.AL
             }
         }
 
+        public void SetNextFrame(Frame nf)
+        {
+            NextFrame = nf;
+        }
+
         public RTPPacket[] GetArrayToSend()
         {
             if (!_rangeDetected)
             {
+                lock (_packets)
+                {
+                    Console.Write($"Send drop packets {FrameId}");
+                    var result = _packets.Values.OrderBy(x => x.Header.SequenceNumber).ToArray();
+                    foreach ( RTPPacket packet in result)
+                    {
+                        Console.Write($" {packet.Header.SequenceNumber}");
+                    }
+
+                    Console.WriteLine(".");
+                    
+                    return result;
+                }
                 return null;
             }
 
-            foreach (var packet in _rangePackets)
+            //todo: отправить, что есть
+
+            var listLostPackets = new List<int>();
+            for(ushort i = 0; i < _rangePackets.Length; i++)
             {
+                var packet = _rangePackets[i];
                 if (packet == null)
                 {
-                    return null;
+                    listLostPackets.Add(GetPacketRange(i, (ushort)_firstPacketNumber));
+                    //Console.WriteLine($"Return array to send with drop packets {FrameId}");
+                    
+                    //return null;
                 }
+            }
+
+            if(listLostPackets.Count > 0)
+            {
+                Console.Write("Range packets with lost packet:");
+                foreach (var packet in listLostPackets)
+                {
+                    Console.Write($" {packet}");
+                }
+                Console.WriteLine(".");
+
+                return _rangePackets.Where(x => x != null).ToArray();
             }
 
             return _rangePackets;
@@ -430,13 +640,42 @@ namespace SIPSorcery.net.AL
         {
             var result = seq1 - seq2;
 
-            if (result >= 0)
+            if(result < 0)
             {
-                return result;
+                result = -result;
             }
 
-            return ushort.MaxValue + seq1 - seq2;
+            if (result > ushort.MaxValue / 2)
+            {
+                result = ushort.MaxValue - result + 1;
+            }
 
+            return result;
+        }
+
+        //min < max = true
+        private bool Compare(ushort min, ushort max)
+        {
+            var delta = max - min;
+
+            if (delta == 0)
+            {
+                return false;
+            }
+
+            var a = delta;
+
+            if(a < 0)
+            {
+                a = -a;
+            }
+
+            if (a > ushort.MaxValue / 2)
+            {
+                return min > max;
+            }
+
+            return min < max;
         }
 
 
@@ -466,6 +705,7 @@ namespace SIPSorcery.net.AL
 
             FinalPacketDetected = null;
             PreviousFrame = null;
+            NextFrame = null;
             _packets = null;
             _nackPackets = null;
             _rangePackets = null;

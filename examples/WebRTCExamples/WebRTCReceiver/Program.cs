@@ -110,9 +110,17 @@ namespace demo
             var setLatencyButton = new Button() { Location = new Point(20, 80), Size = new Size(50, 50), Visible = true, Text = "Latency" };
             setLatencyButton.Click += SetLatency;
 
+            var reStartButton = new Button() { Location = new Point(80, 80), Size = new Size(50, 50), Visible = true, Text = "Restart" };
+            reStartButton.Click += ReStart;
+
+            var stop = new Button() { Location = new Point(140, 80), Size = new Size(50, 50), Visible = true, Text = "Stop" };
+            stop.Click += Stop;
+
             _form.Controls.Add(button);
             _form.Controls.Add(stopNackButton);
             _form.Controls.Add(setLatencyButton);
+            _form.Controls.Add(reStartButton);
+            _form.Controls.Add(stop);
 
             Application.EnableVisualStyles();
             Application.Run(_form);
@@ -153,6 +161,27 @@ namespace demo
             Console.WriteLine($"Set Latency: {latency}");
         }
 
+        private static void ReStart(object sender, EventArgs e)
+        {
+            //_exitCts = new CancellationTokenSource();
+            //_pc.Close(null);
+            //_pc.restartIce();
+            _exitCts = new CancellationTokenSource();
+            _wsClient.ReStart(_exitCts.Token, CreatePeerConnection);
+            Thread.Sleep(1000);
+            //_wsClient.SendRequest(_exitCts.Token);
+        }
+
+        private static void Stop(object sender, EventArgs e)
+        {
+            //_exitCts = new CancellationTokenSource();
+            Console.WriteLine("Stop");
+            //_pc.Close(null);
+            //_pc.restartIce();
+            _exitCts.Cancel();
+            _pc.Dispose();
+        }
+
         private static RTCPeerConnection _pc;
         private static JitterBuffer2 _jb;
 
@@ -164,7 +193,7 @@ namespace demo
                 //X_UseRtpFeedbackProfile = true
             };
             _pc = new RTCPeerConnection(config);
-            _jb = new JitterBuffer2(_pc, _udpClient, 6000);
+            _jb = new JitterBuffer2(_pc, _udpClient, 6000, VideoCodecsEnum.H265);
 
             // Add local receive only tracks. This ensures that the SDP answer includes only the codecs we support.
             if (!_options.NoAudio)

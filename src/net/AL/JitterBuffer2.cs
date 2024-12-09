@@ -6,6 +6,7 @@ using SIPSorceryMedia.Abstractions;
 using System.Linq;
 using System.Net.Sockets;
 using System.Threading;
+using Org.BouncyCastle.Bcpg;
 
 namespace SIPSorcery.net.AL
 {
@@ -15,6 +16,8 @@ namespace SIPSorcery.net.AL
         private const uint FRAME_RATE = 25;
 
         public bool IsSendNack { get; set; }
+
+        private VideoCodecsEnum _codec;
 
         private RTCPeerConnection _pc;
         private UdpClient _udpClient;
@@ -42,12 +45,14 @@ namespace SIPSorcery.net.AL
         private Dictionary<ushort, uint> _nackForFrames = new Dictionary<ushort, uint>();
 
 
-        public JitterBuffer2(RTCPeerConnection pc, UdpClient udpClient, int gsPort)
+        public JitterBuffer2(RTCPeerConnection pc, UdpClient udpClient, int gsPort, VideoCodecsEnum codec)
         {
             _pc = pc;
             _gstPort = gsPort;
             _udpClient = udpClient;
             IsSendNack = true;
+            _codec = codec;
+
 
             _sendThread = new Thread(new ThreadStart(SendFrame));
             _sendThread.Start();
@@ -85,7 +90,9 @@ namespace SIPSorcery.net.AL
 
             if (timeMs - packetLatency > _latencyMs)
             {
-                Console.WriteLine($"Drop packet {p.Header.SequenceNumber}");
+                Console.WriteLine($"Drop packet {p.Header.SequenceNumber} latency: {timeMs - packetLatency}");
+                var data = p.GetBytes();
+                _udpClient.Send(data, data.Length, "127.0.0.1", _gstPort);
                 return;
             }
 
@@ -126,7 +133,7 @@ namespace SIPSorcery.net.AL
                         }
                     }
 
-                    var frame = new Frame(p, startSeqNum, previousFrame, GetFrameId(p.Header.Timestamp), timeMs);
+                    var frame = new Frame(p, startSeqNum, previousFrame, GetFrameId(p.Header.Timestamp), timeMs, _codec);
 
                     if (_nackForFrames.ContainsKey(p.Header.SequenceNumber))
                     {

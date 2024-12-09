@@ -46,6 +46,7 @@ namespace SIPSorcery.Net
         public RTCPeerConnection RTCPeerConnection => _pc;
 
         private ClientWebSocket _ws;
+        private Task _readTask;
 
         /// <summary>
         /// Default constructor.
@@ -73,6 +74,7 @@ namespace SIPSorcery.Net
         public async Task Start(CancellationToken cancellation)
         {
             _pc = await _createPeerConnection().ConfigureAwait(false);
+            _readTask?.Dispose();
 
             logger.LogDebug($"websocket-client attempting to connect to {_webSocketServerUri}.");
 
@@ -100,13 +102,36 @@ namespace SIPSorcery.Net
                     }
                 };
 
-                _ = Task.Run(() => ReceiveFromWebSocket(_pc, webSocketClient, cancellation)).ConfigureAwait(false);
-
-
+                _readTask = Task.Run(() => ReceiveFromWebSocket(_pc, _ws, cancellation));
+                _ = _readTask.ConfigureAwait(false);
             }
             else
             {
                 _pc.Close("web socket connection failure");
+            }
+        }
+
+        public async Task ReStart(CancellationToken cancellation, Func<Task<RTCPeerConnection>> createPeerConnection)
+        {
+            
+            _createPeerConnection = createPeerConnection;
+            if (_ws.State == WebSocketState.Open)
+            {
+                _pc = await _createPeerConnection().ConfigureAwait(false);
+                Thread.Sleep(1000);
+
+                logger.LogDebug($"Restart websocket-client attempting to connect to {_webSocketServerUri}.");
+
+                logger.LogDebug($"websocket-client starting receive task for server {_webSocketServerUri}.");
+                _readTask.Dispose();
+                _readTask = Task.Run(() => ReceiveFromWebSocket(_pc, _ws, cancellation));
+                _ = _readTask.ConfigureAwait(false);
+                
+
+            }
+            else
+            {
+                Start(cancellation);
             }
         }
 
@@ -145,8 +170,9 @@ namespace SIPSorcery.Net
 
         public void SendRequest(CancellationToken ct)
         {
+            var exitCts = new CancellationTokenSource();
             var str = TinyJson.JSONWriter.ToJson(new { id = "123", type = "request" });
-            _ws.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(str)), WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+            _ws.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(str)), WebSocketMessageType.Text, true, exitCts.Token).ConfigureAwait(false);
         }
 
         private async Task<string> OnMessage(string jsonStr, RTCPeerConnection pc, ClientWebSocket ws)
@@ -192,6 +218,11 @@ namespace SIPSorcery.Net
             }
 
             return null;
+        }
+
+        private void Close(CancellationToken cancellation)
+        {
+            _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, null, cancellation);
         }
     }
 }
