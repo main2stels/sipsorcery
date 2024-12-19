@@ -12,7 +12,7 @@ namespace SIPSorcery.net.AL
 {
     public class JitterBuffer2
     {
-        private const uint TIME_STAMP_FREQ = 90000;
+        private uint _clockRate = 90000;
         private const uint FRAME_RATE = 25;
 
         public bool IsSendNack { get; set; }
@@ -20,12 +20,9 @@ namespace SIPSorcery.net.AL
         private VideoCodecsEnum _codec;
 
         private RTCPeerConnection _pc;
-        private UdpClient _udpClient;
 
         private uint _latencyMs = 400;
         private uint _currentTime;
-
-        private int _gstPort = 6000;
 
         private Thread _sendThread;
 
@@ -44,23 +41,33 @@ namespace SIPSorcery.net.AL
         //seq, time
         private Dictionary<ushort, uint> _nackForFrames = new Dictionary<ushort, uint>();
 
+        private Action<byte[], int, int, int> _sendFrameAction;
 
-        public JitterBuffer2(RTCPeerConnection pc, UdpClient udpClient, int gsPort, VideoCodecsEnum codec)
+        private Action<string> _sendLog;
+
+
+        public JitterBuffer2(RTCPeerConnection pc, Action<byte[], int, int, int> sendFrameAction, VideoCodecsEnum codec, Action<string> sendLog)
         {
             _pc = pc;
-            _gstPort = gsPort;
-            _udpClient = udpClient;
+            _sendFrameAction = sendFrameAction;
             IsSendNack = true;
             _codec = codec;
 
 
             _sendThread = new Thread(new ThreadStart(SendFrame));
             _sendThread.Start();
+            _sendLog = sendLog;
+
+            
         }
 
         public void SetVideoFormats(List<VideoFormat> formats)
         {
-            Console.WriteLine("Set video format");
+            _sendLog?.Invoke("Set video format");
+            var format = formats.Where(x => x.Codec == VideoCodecsEnum.H264 || x.Codec == VideoCodecsEnum.H265)
+                .FirstOrDefault();
+            _codec = format.Codec;
+            _clockRate = (uint)format.ClockRate;
         }
 
         public void SetLatency(uint latency)
@@ -78,7 +85,7 @@ namespace SIPSorcery.net.AL
 
             if (timeF < p.Header.Timestamp)
             {
-                //Console.WriteLine($"Update Time time:{TimeFToMillsec(timeF)} packet time: {TimeFToMillsec(p.Header.Timestamp)}");
+                //_sendLog?.Invoke($"Update Time time:{TimeFToMillsec(timeF)} packet time: {TimeFToMillsec(p.Header.Timestamp)}");
                 _time = (p.Header.Timestamp, DateTime.UtcNow);
                 timeF = GetTimeF(timeNow);
             }
@@ -90,9 +97,9 @@ namespace SIPSorcery.net.AL
 
             if (timeMs - packetLatency > _latencyMs)
             {
-                Console.WriteLine($"Drop packet {p.Header.SequenceNumber} latency: {timeMs - packetLatency}");
-                var data = p.GetBytes();
-                _udpClient.Send(data, data.Length, "127.0.0.1", _gstPort);
+                //_sendLog?.Invoke($"Drop packet {p.Header.SequenceNumber} latency: {timeMs - packetLatency}");
+                //var data = p.GetBytes();
+                //_udpClient.Send(data, data.Length, "127.0.0.1", _gstPort);
                 return;
             }
 
@@ -102,7 +109,7 @@ namespace SIPSorcery.net.AL
 
             if (latency >= 0)
             {
-                //Console.WriteLine($"latency: {latency} ms");
+                //_sendLog?.Invoke($"latency: {latency} ms");
             }
 
 
@@ -137,7 +144,7 @@ namespace SIPSorcery.net.AL
 
                     if (_nackForFrames.ContainsKey(p.Header.SequenceNumber))
                     {
-                        Console.WriteLine($"Nack For Frames Receive {GetFrameId(p)}");
+                        _sendLog?.Invoke($"Nack For Frames Receive {GetFrameId(p)}");
 
                         if (_frames.ContainsKey(GetFrameId(p) + 1))
                         {
@@ -145,7 +152,7 @@ namespace SIPSorcery.net.AL
 
                             if (nextFrame.PreviousFrame == null)
                             {
-                                Console.WriteLine("Set PreviousFrame for next Frame");
+                                _sendLog?.Invoke("Set PreviousFrame for next Frame");
                                 nextFrame.SetPreviousFrame(frame);
                             }
                         }
@@ -156,14 +163,14 @@ namespace SIPSorcery.net.AL
 
                         if (nextFrame.PreviousFrame == null)
                         {
-                            Console.WriteLine("Set PreviousFrame without NACK!!!");
+                            _sendLog?.Invoke("Set PreviousFrame without NACK!!!");
                             nextFrame.SetPreviousFrame(frame);
                         }
                     }
 
                     if (previousFrame == null)
                     {
-                        Console.WriteLine($"previousFrame null for {frame.FrameId}");
+                        _sendLog?.Invoke($"previousFrame null for {frame.FrameId}");
                     }
 
                     SendNack(latency, timeMs, frame);
@@ -181,7 +188,7 @@ namespace SIPSorcery.net.AL
                     {
                         if (_frames.ContainsKey(GetPreviousFrameId(p)))
                         {
-                            Console.WriteLine($"previous find!!! {frame.FrameId}");
+                            _sendLog?.Invoke($"previous find!!! {frame.FrameId}");
                             frame.SetPreviousFrame(_frames[GetPreviousFrameId(p)]);
                         }
                     }
@@ -199,10 +206,10 @@ namespace SIPSorcery.net.AL
                 {
                     if (nackPackets.Count > 0)
                     {
-                        Console.Write($"Nack send: {oldFrame.Value.FrameId} id.");
+                        //Console.Write($"Nack send: {oldFrame.Value.FrameId} id.");
                         foreach (var packet in nackPackets)
                         {
-                            Console.Write($"{packet}, ");
+                            //Console.Write($"{packet}, ");
                         }
 
                         var sort = nackPackets.OrderBy(x => x, new SeqIdComparer()).ToArray();
@@ -210,13 +217,13 @@ namespace SIPSorcery.net.AL
 
                         if (nackPackets.Count > 16)
                         {
-                            Console.WriteLine($"packet lost > 16");
+                            _sendLog?.Invoke($"packet lost > 16");
                         }
 
                         int blp = GetBlp(sort);
 
 
-                        Console.WriteLine($"blp: {blp}");
+                        //_sendLog?.Invoke($"blp: {blp}");
 
                         if (IsSendNack)
                         {
@@ -265,7 +272,7 @@ namespace SIPSorcery.net.AL
                         var start = framesLost.Min();
                         var blp = GetBlp(sort);
 
-                        Console.WriteLine($"lost frame blp: {blp}, FrameId: {currentFrame.FrameId - 1}");
+                        _sendLog?.Invoke($"lost frame blp: {blp}, FrameId: {currentFrame.FrameId - 1}");
 
                         if (IsSendNack)
                         {
@@ -325,21 +332,30 @@ namespace SIPSorcery.net.AL
                             foreach (var packet in packetsToSend)
                             {
                                 var data = packet.GetBytes();
-                                _udpClient.Send(data, data.Length, "127.0.0.1", _gstPort);
+                                //_udpClient.Send(data, data.Length, "127.0.0.1", _gstPort);
+                                try 
+                                {
+                                    _sendFrameAction?.Invoke(data, 96, (int)_clockRate, _codec == VideoCodecsEnum.H265 ? 265 : 264);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _sendLog?.Invoke("Send frame action error");
+                                }
+                                
                             }
                         }
                         else
                         {
-                            Console.WriteLine($"Packets to send == null for frame: {minPacket.FrameId}");
+                            _sendLog?.Invoke($"Packets to send == null for frame: {minPacket.FrameId}");
                         }
 
                         if (minPacket.PreviousFrame == null)
                         {
-                            Console.WriteLine($"Previous Packet NULL for frame {minPacket.FrameId}");
+                            _sendLog?.Invoke($"Previous Packet NULL for frame {minPacket.FrameId}");
                         }
                         else if (minPacket.FrameId - minPacket.PreviousFrame.FrameId > 1)
                         {
-                            Console.WriteLine("Delta Error");
+                            _sendLog?.Invoke("Delta Error");
                         }
 
 
@@ -374,7 +390,7 @@ namespace SIPSorcery.net.AL
                 _firstFrameTime = packetTime;
             }
 
-            return (int)(packetTime - _firstFrameTime) / (int)(TIME_STAMP_FREQ / FRAME_RATE);
+            return (int)(packetTime - _firstFrameTime) / (int)(_clockRate / FRAME_RATE);
         }
 
 
@@ -390,24 +406,24 @@ namespace SIPSorcery.net.AL
                 _firstFrameTime = packetTime;
             }
 
-            return (((long)packetTime - _firstFrameTime) / (int)(TIME_STAMP_FREQ / FRAME_RATE)) - 1;
+            return (((long)packetTime - _firstFrameTime) / (int)(_clockRate / FRAME_RATE)) - 1;
         }
 
         private uint GetTimeF(DateTime timeNow)
         {
             var delta = timeNow - _time.Item2;
 
-            return _time.Item1 + ((uint)delta.TotalMilliseconds * (TIME_STAMP_FREQ / 1000));
+            return _time.Item1 + ((uint)delta.TotalMilliseconds * (_clockRate / 1000));
         }
 
         private uint TimeFToMillsec(uint timeF)
         {
-            return timeF / (TIME_STAMP_FREQ / 1000);
+            return timeF / (_clockRate / 1000);
         }
 
         public void Dispose()
         {
-
+            _isDisposed = true;
         }
     }
 }

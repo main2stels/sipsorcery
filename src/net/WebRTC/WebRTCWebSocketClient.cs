@@ -33,6 +33,8 @@ namespace SIPSorcery.Net
     /// </summary>
     public class WebRTCWebSocketClient
     {
+        public bool IsClientPing { get; private set; }
+
         private const int MAX_RECEIVE_BUFFER = 8192;
         private const int MAX_SEND_BUFFER = 8192;
         private const int WEB_SOCKET_CONNECTION_TIMEOUT_MS = 10000;
@@ -47,6 +49,9 @@ namespace SIPSorcery.Net
 
         private ClientWebSocket _ws;
         private Task _readTask;
+        private CancellationTokenSource _readTaskCancellationToken;
+
+        private Action<string> _logMp;
 
         /// <summary>
         /// Default constructor.
@@ -55,8 +60,9 @@ namespace SIPSorcery.Net
         /// ICE candidate exchange.</param>
         public WebRTCWebSocketClient(
             string webSocketServer,
-            Func<Task<RTCPeerConnection>> createPeerConnection)
+            Func<Task<RTCPeerConnection>> createPeerConnection, Action<string> logMp = null)
         {
+            _logMp = logMp;
             if (string.IsNullOrWhiteSpace(webSocketServer))
             {
                 throw new ArgumentNullException("The web socket server URI must be supplied.");
@@ -71,12 +77,12 @@ namespace SIPSorcery.Net
         /// An SDP offer is expected from the server. Once it has been received an SDP answer 
         /// will be returned.
         /// </summary>
-        public async Task Start(CancellationToken cancellation)
+        public async Task Start()
         {
             _pc = await _createPeerConnection().ConfigureAwait(false);
             _readTask?.Dispose();
 
-            logger.LogDebug($"websocket-client attempting to connect to {_webSocketServerUri}.");
+            LogDebug($"websocket-client attempting to connect to {_webSocketServerUri}.");
 
             var webSocketClient = new ClientWebSocket();
             _ws = webSocketClient;
@@ -91,7 +97,9 @@ namespace SIPSorcery.Net
 
             if (webSocketClient.State == WebSocketState.Open)
             {
-                logger.LogDebug($"websocket-client starting receive task for server {_webSocketServerUri}.");
+                LogDebug($"websocket-client starting receive task for server {_webSocketServerUri}.");
+
+                
 
                 _pc.onicecandidate += (iceCandidate) =>
                 {
@@ -102,8 +110,22 @@ namespace SIPSorcery.Net
                     }
                 };
 
-                _readTask = Task.Run(() => ReceiveFromWebSocket(_pc, _ws, cancellation));
+                _readTaskCancellationToken = new CancellationTokenSource();
+                _readTask = Task.Run(() => ReceiveFromWebSocket(_pc, _ws, _readTaskCancellationToken.Token));
                 _ = _readTask.ConfigureAwait(false);
+
+                var token = new CancellationTokenSource();
+
+                IsClientPing = false;
+                while (webSocketClient.State == WebSocketState.Open && !IsClientPing)
+                {
+                    SendPing();
+
+                    LogDebug($"ping air-link");
+                    Thread.Sleep(2500);
+                }
+
+                SendRequest(token.Token);
             }
             else
             {
@@ -111,27 +133,44 @@ namespace SIPSorcery.Net
             }
         }
 
-        public async Task ReStart(CancellationToken cancellation, Func<Task<RTCPeerConnection>> createPeerConnection)
+        public async Task ReStart(Func<Task<RTCPeerConnection>> createPeerConnection)
         {
-            
             _createPeerConnection = createPeerConnection;
+            _readTaskCancellationToken.Cancel();
+            Thread.Sleep(1000);
+
             if (_ws.State == WebSocketState.Open)
             {
                 _pc = await _createPeerConnection().ConfigureAwait(false);
                 Thread.Sleep(1000);
 
-                logger.LogDebug($"Restart websocket-client attempting to connect to {_webSocketServerUri}.");
+                LogDebug($"Restart websocket-client attempting to connect to {_webSocketServerUri}.");
+                //_readTask?.Dispose();
 
-                logger.LogDebug($"websocket-client starting receive task for server {_webSocketServerUri}.");
-                _readTask.Dispose();
-                _readTask = Task.Run(() => ReceiveFromWebSocket(_pc, _ws, cancellation));
+                _readTaskCancellationToken.Cancel();
+
+                Thread.Sleep(1000);
+
+                _readTaskCancellationToken = new CancellationTokenSource();
+                _readTask = Task.Run(() => ReceiveFromWebSocket(_pc, _ws, _readTaskCancellationToken.Token));
                 _ = _readTask.ConfigureAwait(false);
-                
 
+                var token = new CancellationTokenSource();
+                IsClientPing = false;
+                while (_ws.State == WebSocketState.Open && !IsClientPing)
+                {
+                    SendPing();
+
+                    LogDebug($"ping air-link");
+                    Thread.Sleep(2500);
+                }
+
+                SendRequest(token.Token);
+                
             }
             else
             {
-                Start(cancellation);
+                Start();
             }
         }
 
@@ -140,8 +179,10 @@ namespace SIPSorcery.Net
             var buffer = new byte[MAX_RECEIVE_BUFFER];
             int posn = 0;
 
-            while (ws.State == WebSocketState.Open &&
-                (pc.connectionState == RTCPeerConnectionState.@new || pc.connectionState == RTCPeerConnectionState.connecting))
+            //while (ws.State == WebSocketState.Open &&
+            //    (pc.connectionState == RTCPeerConnectionState.@new || pc.connectionState == RTCPeerConnectionState.connecting 
+            //    || pc.connectionState == RTCPeerConnectionState.connected))
+            while (ws.State == WebSocketState.Open)
             {
                 WebSocketReceiveResult receiveResult;
                 do
@@ -165,14 +206,38 @@ namespace SIPSorcery.Net
                 posn = 0;
             }
 
-            logger.LogDebug($"websocket-client receive loop exiting.");
+            LogDebug($"websocket-client receive loop exiting.");
         }
 
+        private int sessionId;
         public void SendRequest(CancellationToken ct)
         {
             var exitCts = new CancellationTokenSource();
+            if (sessionId == 0)
+            {
+                sessionId = new Random((int)new TimeSpan(DateTime.Now.Ticks).TotalSeconds).Next();
+            }
+            //var str = TinyJson.JSONWriter.ToJson(new { id = sessionId.ToString(), type = "request" });
             var str = TinyJson.JSONWriter.ToJson(new { id = "123", type = "request" });
             _ws.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(str)), WebSocketMessageType.Text, true, exitCts.Token).ConfigureAwait(false);
+        }
+
+        public void SendPing()
+        {
+            IsClientPing = false;
+            if (_ws.State == WebSocketState.Open)
+            {
+                var exitCts = new CancellationTokenSource();
+
+                if(sessionId == 0)
+                {
+                    sessionId = new Random((int)new TimeSpan(DateTime.Now.Ticks).TotalSeconds).Next();
+                }
+
+                //var str = TinyJson.JSONWriter.ToJson(new { id = sessionId.ToString(), type = "ping" });
+                var str = TinyJson.JSONWriter.ToJson(new { id = "123", type = "ping" });
+                _ws.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(str)), WebSocketMessageType.Text, true, exitCts.Token).ConfigureAwait(false);
+            }
         }
 
         private async Task<string> OnMessage(string jsonStr, RTCPeerConnection pc, ClientWebSocket ws)
@@ -182,7 +247,7 @@ namespace SIPSorcery.Net
                 //var offerSdp = _pc.createOffer(null);
                 //await _pc.setLocalDescription(offerSdp).ConfigureAwait(false);
 
-                //logger.LogDebug($"Sending SDP offer to client.");
+                //LogDebug($"Sending SDP offer to client.");
 
                 //return offerSdp.toJSON();
                 //return TinyJson.JSONWriter.ToJson(new { id = "123", type = "request" });
@@ -190,17 +255,17 @@ namespace SIPSorcery.Net
 
             if (RTCIceCandidateInit.TryParse(jsonStr, out var iceCandidateInit))
             {
-                logger.LogDebug("Got remote ICE candidate.");
+                LogDebug("Got remote ICE candidate.");
                 pc.addIceCandidate(iceCandidateInit);
             }
             else if (RTCSessionDescriptionInit.TryParse(jsonStr, out var descriptionInit))
             {
-                logger.LogDebug($"Got remote SDP, type {descriptionInit.type}.");
+                LogDebug($"Got remote SDP, type {descriptionInit.type}.");
 
                 var result = pc.setRemoteDescription(descriptionInit);
                 if (result != SetDescriptionResultEnum.OK)
                 {
-                    logger.LogWarning($"Failed to set remote description, {result}.");
+                    LogWarning($"Failed to set remote description, {result}.");
                     pc.Close("failed to set remote description");
                 }
 
@@ -214,7 +279,13 @@ namespace SIPSorcery.Net
             }
             else
             {
-                logger.LogWarning($"websocket-client could not parse JSON message. {jsonStr}");
+                if(jsonStr.Contains("ping"))
+                {
+                    LogWarning($"Ping received");
+                    IsClientPing = true;
+                    return null;
+                }
+                LogWarning($"websocket-client could not parse JSON message. {jsonStr}");
             }
 
             return null;
@@ -223,6 +294,18 @@ namespace SIPSorcery.Net
         private void Close(CancellationToken cancellation)
         {
             _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, null, cancellation);
+        }
+
+        private void LogDebug(string msg)
+        {
+            logger.LogDebug(msg);
+            _logMp?.Invoke(msg);
+        }
+
+        private void LogWarning(string msg) 
+        {
+            logger.LogWarning(msg);
+            _logMp?.Invoke(msg);
         }
     }
 }

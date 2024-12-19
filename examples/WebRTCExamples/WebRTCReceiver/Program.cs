@@ -38,6 +38,8 @@ using WebSocketSharp.Server;
 using SIPSorcery.net.AL;
 using System.Text;
 using System.Text.RegularExpressions;
+using Org.BouncyCastle.Tls;
+using static System.Windows.Forms.AxHost;
 
 namespace demo
 {
@@ -58,10 +60,6 @@ namespace demo
 
     class Program
     {
-        private const string ffmpegLibFullPath = @"C:\ffmpeg-6.1.1-full_build-shared\bin"; //  /!\ A valid path to FFmpeg library
-
-        private const string STUN_URL = "stun:stun.sipsorcery.com";
-        private const int WEBSOCKET_PORT = 8081;
         private const int VIDEO_INITIAL_WIDTH = 640;
         private const int VIDEO_INITIAL_HEIGHT = 480;
 
@@ -74,6 +72,7 @@ namespace demo
         private static UdpClient _udpClient = new UdpClient(10000);
         private static WebRTCWebSocketClient _wsClient;
         private static CancellationTokenSource _exitCts;
+        private static int _gstreamerPort = 6000;
 
         static void Main(string[] args)
         {
@@ -88,8 +87,9 @@ namespace demo
             _exitCts = new CancellationTokenSource();
             // Start web socket.
             Console.WriteLine("Starting web socket server...");
-            _wsClient = new WebRTCWebSocketClient("ws://apcloud.csky.space/wstest?name=pupa&partnerName=lupa", CreatePeerConnection);
-            _wsClient.Start(_exitCts.Token);
+            //_wsClient = new WebRTCWebSocketClient("ws://apcloud.csky.space/wstest?name=GS0015E&partnerName=0015E", CreatePeerConnection);
+            _wsClient = new WebRTCWebSocketClient("ws://apcloud.csky.space/wstest?name=GS0015E&partnerName=0015E", CreatePeerConnection);
+            _wsClient.Start();
 
             _form = new Form();
             _form.AutoSize = true;
@@ -107,6 +107,9 @@ namespace demo
             var stopNackButton = new Button() { Location = new Point(80, 20), Size = new Size(50, 50), Visible = true };
             stopNackButton.Click += StopNackClick;
 
+            var pingButton = new Button() { Location = new Point(140, 20), Size = new Size(50, 50), Visible = true, Text = "Ping" };
+            pingButton.Click += PingButton_Click; ;
+
             var setLatencyButton = new Button() { Location = new Point(20, 80), Size = new Size(50, 50), Visible = true, Text = "Latency" };
             setLatencyButton.Click += SetLatency;
 
@@ -121,9 +124,15 @@ namespace demo
             _form.Controls.Add(setLatencyButton);
             _form.Controls.Add(reStartButton);
             _form.Controls.Add(stop);
+            _form.Controls.Add(pingButton);
 
             Application.EnableVisualStyles();
             Application.Run(_form);
+        }
+
+        private static void PingButton_Click(object sender, EventArgs e)
+        {
+            _wsClient.SendPing();
         }
 
         private static void Button_Click(object sender, EventArgs e)
@@ -166,10 +175,14 @@ namespace demo
             //_exitCts = new CancellationTokenSource();
             //_pc.Close(null);
             //_pc.restartIce();
-            _exitCts = new CancellationTokenSource();
-            _wsClient.ReStart(_exitCts.Token, CreatePeerConnection);
-            Thread.Sleep(1000);
+            Restart();
             //_wsClient.SendRequest(_exitCts.Token);
+        }
+
+        private static void Restart()
+        {
+            Thread.Sleep(1000);
+            _wsClient.ReStart(CreatePeerConnection);
         }
 
         private static void Stop(object sender, EventArgs e)
@@ -178,12 +191,26 @@ namespace demo
             Console.WriteLine("Stop");
             //_pc.Close(null);
             //_pc.restartIce();
-            _exitCts.Cancel();
+            _jb.Dispose();
             _pc.Dispose();
+            
+            _exitCts.Cancel();
+
+            Thread.Sleep(5000);
         }
 
         private static RTCPeerConnection _pc;
         private static JitterBuffer2 _jb;
+
+        private static void SendToGstreamer(byte[] data, int a, int b, int c)
+        {
+            _udpClient.Send(data, data.Length, "127.0.0.1", _gstreamerPort);
+        }
+
+        private static void Log(string message)
+        {
+            logger.LogDebug(message);
+        }
 
         private static Task<RTCPeerConnection> CreatePeerConnection()
         {
@@ -193,7 +220,7 @@ namespace demo
                 //X_UseRtpFeedbackProfile = true
             };
             _pc = new RTCPeerConnection(config);
-            _jb = new JitterBuffer2(_pc, _udpClient, 6000, VideoCodecsEnum.H265);
+            _jb = new JitterBuffer2(_pc, SendToGstreamer, VideoCodecsEnum.H265, Log);
 
             // Add local receive only tracks. This ensures that the SDP answer includes only the codecs we support.
             if (!_options.NoAudio)
@@ -203,10 +230,8 @@ namespace demo
                 //_pc.addTrack(audioTrack);
             }
 
-            var formats = new List<SDPAudioVideoMediaFormat> { new SDPAudioVideoMediaFormat(new VideoFormat(VideoCodecsEnum.H264, 96)) };
+            var formats = new List<SDPAudioVideoMediaFormat> { new SDPAudioVideoMediaFormat(new VideoFormat(VideoCodecsEnum.H264, 96)), new SDPAudioVideoMediaFormat(new VideoFormat(VideoCodecsEnum.H265, 96)) };
             var videoTrack = new MediaStreamTrack(SDPMediaTypesEnum.video, false, formats, MediaStreamStatusEnum.RecvOnly);
-
-
 
             _pc.addTrack(videoTrack);
 
@@ -231,15 +256,18 @@ namespace demo
                 else if (state == RTCPeerConnectionState.closed)
                 {
                     logger.LogWarning("Reconnect!");
+                    Restart();
                 }
             };
 
             // Diagnostics.
             _pc.OnReceiveReport += (re, media, rr) => logger.LogDebug($"RTCP Receive for {media} from {re}\n{rr.GetDebugSummary()}");
             _pc.OnSendReport += (media, sr) => logger.LogDebug($"RTCP Send for {media}\n{sr.GetDebugSummary()}");
+            _pc.onicecandidateerror += (candidate, error) => logger.LogWarning($"Error adding remote ICE candidate. {error} {candidate}");
             //pc.GetRtpChannel().OnStunMessageReceived += (msg, ep, isRelay) => logger.LogDebug($"RECV STUN {msg.Header.MessageType} (txid: {msg.Header.TransactionId.HexStr()}) from {ep}.");
             //pc.GetRtpChannel().OnStunMessageSent += (msg, ep, isRelay) => logger.LogDebug($"SEND STUN {msg.Header.MessageType} (txid: {msg.Header.TransactionId.HexStr()}) to {ep}.");
             _pc.oniceconnectionstatechange += (state) => logger.LogDebug($"ICE connection state change to {state}.");
+            _pc.OnRtcpBye += (reason) => logger.LogDebug($"RTCP BYE receive, reason: {(string.IsNullOrWhiteSpace(reason) ? "<none>" : reason)}.");
             //_pc.createDataChannel("bombom", new RTCDataChannelInit() { negotiated})
             _pc.ondatachannel += (qwe) => {
                 qwe.onmessage += (datachan, type, data) =>
@@ -359,6 +387,46 @@ namespace demo
         {
             _remoteFormats = formats;
             _jb.SetVideoFormats(formats);
+
+            //create sdp
+
+            var dir = System.AppDomain.CurrentDomain.BaseDirectory;
+            var fileName = "air-link.sdp";
+            var path = dir + fileName;
+
+            var sdpText = CreateSdpText(formats.Where(x => x.Codec == VideoCodecsEnum.H264 || x.Codec == VideoCodecsEnum.H265).FirstOrDefault());
+
+            File.WriteAllText(path, sdpText);
+
+            //start gstreamer
+        }
+
+        private static string CreateSdpText(VideoFormat format)
+        {
+            var result = "v=0\r\n";
+            result += "o=- 0 0 IN IP4 127.0.0.1\r\n";
+            result += "s=LIVE555 Streaming Media v2019.08.12\r\n";
+            result += "c=IN IP4 127.0.0.1\r\n";
+            result += "t=0 0\r\n";
+            result += "a=tool:libavformat 58.76.100\r\n";
+            result += $"m=video {_gstreamerPort} RTP/AVP 96\r\n";
+            result += $"a=rtpmap:96 {GetCodecName(format.Codec)}/{format.ClockRate}\r\n";
+            result += $"a=fmtp:96 {format.Parameters}";
+
+            return result;
+        }
+
+        private static string GetCodecName(VideoCodecsEnum codec)
+        {
+            switch(codec)
+            {
+                case VideoCodecsEnum.H265:
+                    return "H265";
+                case VideoCodecsEnum.H264:
+                    return "H264";
+                default:
+                    return "Codec Error";
+            }
         }
 
         private static void VideoFrameReceived(IPEndPoint ip, uint time, byte[] payload, VideoFormat format)

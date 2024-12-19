@@ -81,6 +81,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Crypto.Digests;
@@ -88,6 +89,7 @@ using Org.BouncyCastle.Crypto.Engines;
 using Org.BouncyCastle.Crypto.Macs;
 using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.Utilities;
+using SIPSorcery.net.AL;
 
 namespace SIPSorcery.Net
 {
@@ -468,6 +470,8 @@ namespace SIPSorcery.Net
          * @return true if the packet can be accepted false if the packet failed
          *         authentication or failed replay check
          */
+
+        private int oldRoc = 0;
         public bool ReverseTransformPacket(RawPacket pkt)
         {
             int seqNo = pkt.GetSequenceNumber();
@@ -501,13 +505,31 @@ namespace SIPSorcery.Net
                 // save computed authentication in tagStore
                 AuthenticatePacketHMCSHA1(pkt, guessedROC);
 
+                bool fail = false;
+
                 for (int i = 0; i < tagLength; i++)
                 {
                     if ((tempStore[i] & 0xff) != (tagStore[i] & 0xff))
                     {
+                        
                         //return false;
-                        Console.WriteLine("tempStore error");
+
+                        if(!fail)
+                        {
+                            fail = true;
+                        }
                     }
+                }
+
+                if(fail)
+                {
+                    Console.WriteLine($"tempStore error {seqNo} roc: {guessedROC} old roc: {oldRoc}, absROC: {_absoluteRoc}");
+                }
+
+                if (oldRoc != guessedROC)
+                {
+                    Console.WriteLine($"!!!!!!!!!!!!!!!!!update roc: {guessedROC} old roc: {oldRoc} fail: {fail} seqNum: {seqNo} absROC: {_absoluteRoc}");
+                    oldRoc = guessedROC;
                 }
             }
 
@@ -770,8 +792,12 @@ namespace SIPSorcery.Net
          *            sequence number of the received RTP packet
          * @return the new SRTP packet index
          */
+
+        private int _absoluteRoc;
+
         private long GuessIndex(int seqNo)
         {
+            CheckROC(seqNo);
             if (this.seqNum < 32768)
             {
                 if (seqNo - this.seqNum > 32768)
@@ -795,9 +821,57 @@ namespace SIPSorcery.Net
                 }
             }
 
+            if(guessedROC > _absoluteRoc)
+            {
+                guessedROC = _absoluteRoc;
+            }
+
 #pragma warning disable CS0675 // Bitwise-or operator used on a sign-extended operand
             return ((long)guessedROC) << 16 | seqNo;
 #pragma warning restore CS0675 // Bitwise-or operator used on a sign-extended operand
+        }
+
+        private int _maxSeq = 0;
+        private int _lastMaxSeq = 0;
+        private bool _isFirstCheck = true;
+        private int _lastUpRock = 0;
+
+        private bool _isFirstUp = true;
+
+        private void CheckROC(int seq)
+        {
+            _lastUpRock++;
+
+            if (_isFirstCheck)
+            {
+                _maxSeq = seq;
+                _isFirstCheck = false;
+                _lastMaxSeq = seq;
+            }
+
+            if(Frame.Compare(_maxSeq, seq))
+            {
+                _maxSeq = seq;
+            }
+
+            if(_lastMaxSeq - _maxSeq > ushort.MaxValue / 2)
+            {
+                if(_isFirstUp)
+                {
+                    _isFirstUp = false;
+                    _lastUpRock = 0;
+                    _absoluteRoc++;
+                    Console.WriteLine($"Up abs rock {_absoluteRoc}");
+                }
+                else if(_lastUpRock > ushort.MaxValue / 2)
+                {
+                    _lastUpRock = 0;
+                    _absoluteRoc++;
+                    Console.WriteLine($"Up abs rock {_absoluteRoc}");
+                }
+            }
+
+            _lastMaxSeq = _maxSeq;
         }
 
         /**

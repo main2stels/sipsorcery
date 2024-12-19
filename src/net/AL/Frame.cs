@@ -247,7 +247,7 @@ namespace SIPSorcery.net.AL
                     {
                         SetFinalPacketNumber(packet.Header.SequenceNumber);
                         FinalPacketDetected?.Invoke((ushort)_finalPacketNumber);
-                        Console.WriteLine($"SetFinalPacketNumber {FrameId} CheckFinalPacket");
+                        //Console.WriteLine($"SetFinalPacketNumber {FrameId} CheckFinalPacket");
                     }
                 }
             }
@@ -395,7 +395,7 @@ namespace SIPSorcery.net.AL
                                 {
                                     if (Compare(seq, (ushort)_nextFrameMinSeq))
                                     {
-                                        Console.WriteLine($"nack reSend: {FrameId}id. {seq}, send count {nack.SendCount}");
+                                        //Console.WriteLine($"nack reSend: {FrameId}id. {seq}, send count {nack.SendCount}");
                                         lostPackets.Add(seq);
                                     }
                                     else
@@ -405,7 +405,7 @@ namespace SIPSorcery.net.AL
                                 }
                                 else
                                 {
-                                    Console.WriteLine($"nack reSend: {FrameId}id. {seq}, send count {nack.SendCount}");
+                                    //Console.WriteLine($"nack reSend: {FrameId}id. {seq}, send count {nack.SendCount}");
                                     lostPackets.Add(seq);
                                 }
                             }
@@ -489,7 +489,7 @@ namespace SIPSorcery.net.AL
                                 {
                                     if (Compare(seq, (ushort)_nextFrameMinSeq))
                                     {
-                                        Console.WriteLine($"nack reSend: {FrameId}id. {seq}, send count {nack.SendCount}");
+                                        //Console.WriteLine($"nack reSend: {FrameId}id. {seq}, send count {nack.SendCount}");
                                         lostPackets.Add(seq);
                                     }
                                     else
@@ -499,7 +499,7 @@ namespace SIPSorcery.net.AL
                                 }
                                 else
                                 {
-                                    Console.WriteLine($"nack reSend: {FrameId}id. {seq}, send count {nack.SendCount}");
+                                    //Console.WriteLine($"nack reSend: {FrameId}id. {seq}, send count {nack.SendCount}");
                                     lostPackets.Add(seq);
                                 }
                             }
@@ -654,7 +654,7 @@ namespace SIPSorcery.net.AL
         }
 
         //min < max = true
-        private bool Compare(ushort min, ushort max)
+        public static bool Compare(ushort min, ushort max)
         {
             var delta = max - min;
 
@@ -666,6 +666,30 @@ namespace SIPSorcery.net.AL
             var a = delta;
 
             if(a < 0)
+            {
+                a = -a;
+            }
+
+            if (a > ushort.MaxValue / 2)
+            {
+                return min > max;
+            }
+
+            return min < max;
+        }
+
+        public static bool Compare(int min, int max)
+        {
+            var delta = max - min;
+
+            if (delta == 0)
+            {
+                return false;
+            }
+
+            var a = delta;
+
+            if (a < 0)
             {
                 a = -a;
             }
