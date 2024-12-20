@@ -45,6 +45,9 @@ namespace SIPSorcery.net.AL
 
         private Action<string> _sendLog;
 
+        private int _framesOverLatency = 0;
+        private uint _downLatencyTime = 10;
+        private uint _maxLatencyMs = 1000;
 
         public JitterBuffer2(RTCPeerConnection pc, Action<byte[], int, int, int> sendFrameAction, VideoCodecsEnum codec, Action<string> sendLog)
         {
@@ -85,9 +88,13 @@ namespace SIPSorcery.net.AL
 
             if (timeF < p.Header.Timestamp)
             {
-                //_sendLog?.Invoke($"Update Time time:{TimeFToMillsec(timeF)} packet time: {TimeFToMillsec(p.Header.Timestamp)}");
+                _sendLog?.Invoke($"Update Time time:{TimeFToMillsec(timeF)} packet time: {TimeFToMillsec(p.Header.Timestamp)}");
                 _time = (p.Header.Timestamp, DateTime.UtcNow);
                 timeF = GetTimeF(timeNow);
+            }
+            else
+            {
+                //_time.Item1-=10;
             }
 
             var timeMs = TimeFToMillsec(timeF);
@@ -95,12 +102,59 @@ namespace SIPSorcery.net.AL
 
             var packetLatency = TimeFToMillsec(p.Header.Timestamp);
 
-            if (timeMs - packetLatency > _latencyMs)
+            if (timeMs - packetLatency > _latencyMs / 2)
             {
-                //_sendLog?.Invoke($"Drop packet {p.Header.SequenceNumber} latency: {timeMs - packetLatency}");
-                //var data = p.GetBytes();
-                //_udpClient.Send(data, data.Length, "127.0.0.1", _gstPort);
-                return;
+                var lat = timeMs - packetLatency;
+                NackRtpPacket nackInfo = null;
+
+                if (_frames.ContainsKey(GetFrameId(p)))
+                {
+                    var frame = _frames[GetFrameId(p)];
+
+                    nackInfo = frame.NackPacketInfo(p, timeMs);
+                }
+
+                if (lat > _latencyMs)
+                {
+                    _sendLog?.Invoke($"Drop packet {p.Header.SequenceNumber} Packetlatency: {timeMs - packetLatency} latency: {_latencyMs}");
+                    _framesOverLatency = 0;
+                    if(nackInfo != null)
+                    {
+                        _sendLog?.Invoke($"With NACK");
+                    }
+                    else
+                    {
+                        _latencyMs += _downLatencyTime / 5;
+                        if(_latencyMs > _maxLatencyMs)
+                        {
+                            _latencyMs = _maxLatencyMs;
+                        }
+                    }
+                    return;
+                }
+
+                if(lat > _latencyMs - _downLatencyTime * 8)
+                {
+                    _latencyMs += _downLatencyTime;
+                    _sendLog?.Invoke($"Up latency time {_latencyMs}");
+                    _framesOverLatency = 0;
+                    if (_latencyMs > _maxLatencyMs)
+                    {
+                        _latencyMs = _maxLatencyMs;
+                    }
+                }
+            }
+            else
+            {
+                
+            }
+
+            if(_framesOverLatency > 60)
+            {
+                //_latencyMs -= _downLatencyTime;
+                _latencyMs -= (uint)(_latencyMs * 0.05f);
+                _framesOverLatency = 15;
+                _sendLog?.Invoke($"Down latency time {_latencyMs}");
             }
 
             _averageTimeEstimator.InsertPacket(p, timeMs);
@@ -118,11 +172,10 @@ namespace SIPSorcery.net.AL
             {
                 if (!_frames.ContainsKey(GetFrameId(p)))
                 {
+                    _framesOverLatency++;
                     Frame previousFrame = null;
 
                     ushort? startSeqNum = null;
-
-
 
                     if (_frames.ContainsKey(GetPreviousFrameId(p)))
                     {
