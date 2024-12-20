@@ -340,6 +340,21 @@ namespace SIPSorcery.net.AL
             }
         }
 
+        public NackRtpPacket NackPacketInfo(RTPPacket packet, uint timeMs)
+        {
+            var seqNum = packet.Header.SequenceNumber;
+            NackRtpPacket nPacket = null;
+
+            if (_nackPackets.Count > 0)
+            {
+                if (_nackPackets.TryGetValue(seqNum, out nPacket))
+                {
+
+                }
+            }
+
+            return nPacket;
+        }
 
         public List<ushort> CheckLostPackets(uint timeMs, int latency)
         {
