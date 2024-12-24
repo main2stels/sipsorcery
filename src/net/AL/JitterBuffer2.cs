@@ -7,6 +7,8 @@ using System.Linq;
 using System.Net.Sockets;
 using System.Threading;
 using Org.BouncyCastle.Bcpg;
+using SIPSorcery.net.AL.NackSupport;
+using System.Collections;
 
 namespace SIPSorcery.net.AL
 {
@@ -47,9 +49,13 @@ namespace SIPSorcery.net.AL
 
         private int _framesOverLatency = 0;
         private uint _downLatencyTime = 10;
-        private uint _maxLatencyMs = 1000;
+        private uint _maxLatencyMs = 800;
+        private uint _minLatencyMs = 50;
 
-        public JitterBuffer2(RTCPeerConnection pc, Action<byte[], int, int, int> sendFrameAction, VideoCodecsEnum codec, Action<string> sendLog)
+        private Dictionary<uint, List<NackInfo>> _nackInfo = new Dictionary<uint, List<NackInfo>>();
+
+        public JitterBuffer2(RTCPeerConnection pc, Action<byte[], int, int, int> sendFrameAction, VideoCodecsEnum codec, 
+            Action<string> sendLog, bool fpvMode, int fpvLatency)
         {
             _pc = pc;
             _sendFrameAction = sendFrameAction;
@@ -61,7 +67,10 @@ namespace SIPSorcery.net.AL
             _sendThread.Start();
             _sendLog = sendLog;
 
-            
+            if(fpvMode)
+            {
+                _maxLatencyMs = (uint)fpvLatency;
+            }
         }
 
         public void SetVideoFormats(List<VideoFormat> formats)
@@ -81,67 +90,116 @@ namespace SIPSorcery.net.AL
 
         private AverageTimeEstimator _averageTimeEstimator = new AverageTimeEstimator();
 
+        private Queue<RTPPacket> _lastPackets = new Queue<RTPPacket>();
+        private int _frameForNotUpTime = 0;
+
         public void ReceivePacket(RTPPacket p)
         {
+            //var data = p.GetBytes();
+            //try
+            //{
+            //    _sendFrameAction?.Invoke(data, 96, (int)_clockRate, _codec == VideoCodecsEnum.H265 ? 265 : 264);
+            //}
+            //catch (Exception ex)
+            //{
+            //    _sendLog?.Invoke("Send frame action error");
+            //}
+
+            //return;
+
             var timeNow = DateTime.UtcNow;
             var timeF = GetTimeF(timeNow);
+            _lastPackets.Enqueue(p);
 
             if (timeF < p.Header.Timestamp)
             {
-                _sendLog?.Invoke($"Update Time time:{TimeFToMillsec(timeF)} packet time: {TimeFToMillsec(p.Header.Timestamp)}");
+                //_sendLog?.Invoke($"Update Time time:{TimeFToMillsec(timeF)} packet time: {TimeFToMillsec(p.Header.Timestamp)}");
                 _time = (p.Header.Timestamp, DateTime.UtcNow);
                 timeF = GetTimeF(timeNow);
+                _frameForNotUpTime = 0;
             }
             else
             {
-                //_time.Item1-=10;
+                //_frameForNotUpTime++;
+
+                //if(_frameForNotUpTime == 100)
+                //{
+                //    _frameForNotUpTime = 0;
+                //    //not nack
+                //    _time = (p.Header.Timestamp, DateTime.UtcNow);
+                //    timeF = GetTimeF(timeNow);
+                //}
             }
+
+            if(_lastPackets.Count > 200)
+            {
+                _lastPackets.Dequeue();
+            }
+
 
             var timeMs = TimeFToMillsec(timeF);
             _currentTime = timeMs;
 
-            var packetLatency = TimeFToMillsec(p.Header.Timestamp);
+            var packetTime = TimeFToMillsec(p.Header.Timestamp);
 
-            if (timeMs - packetLatency > _latencyMs / 2)
+            RemoveOldNackBuffer();
+
+
+            var lat = (int)timeMs - packetTime;
+
+            if(CheckMinTimeStamp(lat, p.Header.Timestamp, timeNow))
             {
-                var lat = timeMs - packetLatency;
-                NackRtpPacket nackInfo = null;
-
-                if (_frames.ContainsKey(GetFrameId(p)))
+                _time = (p.Header.Timestamp, DateTime.UtcNow);
+                timeF = GetTimeF(timeNow);
+                _frameForNotUpTime = 0;
+            }
+            //if (timeMs - packetLatency > _latencyMs / 2)
+            if (lat > _latencyMs / 2)
+            {
+                var nack = GetNack(p.Header.Timestamp, p.Header.SequenceNumber);
+                
+                if (nack != null)
                 {
-                    var frame = _frames[GetFrameId(p)];
-
-                    nackInfo = frame.NackPacketInfo(p, timeMs);
+                    nack.ReceiveCount++;
+                    //_sendLog?.Invoke($"Receive Nack send count: {nack.SendCount}, received count: {nack.ReceiveCount}, seq: {nack.Seq}, latency: {_currentTime - TimeFToMillsec(p.Header.Timestamp)}");
+                    if (nack.ReceiveCount > 1)
+                    {
+                        //_sendLog?.Invoke($"Drop Nack");
+                        return;
+                    }
                 }
 
                 if (lat > _latencyMs)
                 {
-                    _sendLog?.Invoke($"Drop packet {p.Header.SequenceNumber} Packetlatency: {timeMs - packetLatency} latency: {_latencyMs}");
+                    _sendLog?.Invoke($"Drop packet {p.Header.SequenceNumber} Packetlatency: {lat} latency: {_latencyMs}");
                     _framesOverLatency = 0;
-                    if(nackInfo != null)
+
+                    //_latencyMs += _downLatencyTime / 5;
+                    
+
+                    var latDelta = lat - _latencyMs;
+                    var coef = latDelta / (double)_latencyMs;
+                    var isNack = nack != null;
+                    if (coef > 0.3)
                     {
-                        _sendLog?.Invoke($"With NACK");
+                        
+                        _sendLog?.Invoke($"lat delta is big coef:{coef} lat: {lat} isNack: {isNack}");
+                        coef = 0.3;
                     }
-                    else
-                    {
-                        _latencyMs += _downLatencyTime / 5;
-                        if(_latencyMs > _maxLatencyMs)
-                        {
-                            _latencyMs = _maxLatencyMs;
-                        }
-                    }
+
+                    SetLatencyMs(_latencyMs + (uint)(_latencyMs * coef));
+                    _sendLog?.Invoke($"Up latency time {_latencyMs} isNack: {isNack}");
+
+                    SendFrame(p);
+
                     return;
                 }
 
-                if(lat > _latencyMs - _downLatencyTime * 8)
+                if(lat > _latencyMs - _latencyMs * 0.15f)
                 {
-                    _latencyMs += _downLatencyTime;
+                    SetLatencyMs(_latencyMs + (uint)(_latencyMs * 0.01f));
                     _sendLog?.Invoke($"Up latency time {_latencyMs}");
                     _framesOverLatency = 0;
-                    if (_latencyMs > _maxLatencyMs)
-                    {
-                        _latencyMs = _maxLatencyMs;
-                    }
                 }
             }
             else
@@ -152,8 +210,11 @@ namespace SIPSorcery.net.AL
             if(_framesOverLatency > 60)
             {
                 //_latencyMs -= _downLatencyTime;
-                _latencyMs -= (uint)(_latencyMs * 0.05f);
-                _framesOverLatency = 15;
+                SetLatencyMs(_latencyMs - (uint)(_latencyMs * 0.05f));
+
+                
+
+                _framesOverLatency = 30;
                 _sendLog?.Invoke($"Down latency time {_latencyMs}");
             }
 
@@ -223,10 +284,12 @@ namespace SIPSorcery.net.AL
 
                     if (previousFrame == null)
                     {
-                        _sendLog?.Invoke($"previousFrame null for {frame.FrameId}");
+                        //_sendLog?.Invoke($"previousFrame null for {frame.FrameId}");
                     }
 
-                    SendNack(latency, timeMs, frame);
+                    var nackPackets = SendNack(latency, timeMs, frame);
+                    SaveNack(nackPackets);
+
 
                     _frames.Add(GetFrameId(p), frame);
 
@@ -249,8 +312,133 @@ namespace SIPSorcery.net.AL
             }
         }
 
-        private void SendNack(int latency, uint timeMs, Frame currentFrame)
+        private int _checkMinTimeStampCount = 0;
+        private Queue<(long, uint)> _checkMinTimeStamp = new Queue<(long, uint)>();
+        private bool CheckMinTimeStamp(long latency, uint timeStamp, DateTime timeNow)
         {
+            _checkMinTimeStampCount++;
+            _checkMinTimeStamp.Enqueue((latency, timeStamp));
+
+            if(_checkMinTimeStamp.Count > 50)
+            {
+                _checkMinTimeStamp.Dequeue();
+
+                if(_checkMinTimeStampCount > 50)
+                {
+                    _checkMinTimeStampCount = 0;
+
+                    var minLat = _checkMinTimeStamp.Min(x => x.Item1);
+                    _sendLog?.Invoke($"min latency: {minLat}");
+
+                    if(minLat > 20)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private void SetLatencyMs(uint latency)
+        {
+            _latencyMs = latency;
+
+            if (_latencyMs < _minLatencyMs)
+            {
+                _latencyMs = _minLatencyMs;
+            }
+
+            if(_latencyMs > _maxLatencyMs)
+            {
+                _latencyMs = _maxLatencyMs;
+            }
+            _framesOverLatency = 0;
+        }
+
+        private void RemoveOldNackBuffer()
+        {
+            var nackToRemove = _nackInfo.Where(x => TimeFToMillsec(x.Key) < _currentTime - 5000).ToList();
+
+            foreach(var n in nackToRemove)
+            {
+                _nackInfo.Remove(n.Key);
+            }
+        }
+
+        private NackInfo GetNack(uint timeStamp, ushort seq)
+        {
+            if(!_nackInfo.ContainsKey(timeStamp))
+            {
+                return null;
+            }
+
+            var nack = _nackInfo[timeStamp];
+
+            foreach(var n in nack)
+            {
+                if(n.Seq == seq)
+                {
+                    return n;
+                }
+            }
+
+            return null;
+        }
+
+        private void SaveNack(List<NackRequest> nacks)
+        {
+            if (nacks != null)
+            {
+                if (nacks.Count > 1)
+                {
+                    foreach(var nack in nacks)
+                    {
+                        SaveNack(nack);
+                    }
+                }
+                else if(nacks.Count == 0)
+                {
+
+                }
+                else
+                {
+                    var nack = nacks.FirstOrDefault();
+                    SaveNack(nack);
+                }
+            }
+        }
+
+        private void SaveNack(NackRequest nack)
+        {
+            if (_nackInfo.ContainsKey(nack.TimeStamp))
+            {
+                var nackInfo = _nackInfo[nack.TimeStamp];
+
+                foreach (var n in nack.PacketIds)
+                {
+                    var ni = nackInfo.FirstOrDefault(x => x.Seq == n);
+
+                    if (ni == null)
+                    {
+                        nackInfo.Add(new NackInfo(n));
+                    }
+                    else
+                    {
+                        ni.SendCount++;
+                    }
+                }
+            }
+            else
+            {
+                _nackInfo[nack.TimeStamp] = nack.PacketIds.Select(x => { return new NackInfo(x); }).ToList();
+            }
+        }
+
+        private List<NackRequest> SendNack(int latency, uint timeMs, Frame currentFrame)
+        {
+            var result = new List<NackRequest>();
+
             foreach (var oldFrame in _frames)
             {
                 var nackPackets = oldFrame.Value.CheckLostPackets(timeMs, latency);
@@ -282,6 +470,7 @@ namespace SIPSorcery.net.AL
                         {
                             var localVideoSsrc = _pc.VideoLocalTrack.Ssrc;
                             var remoteVideoSsrc = _pc.VideoRemoteTrack.Ssrc;
+                            result.Add(new NackRequest(sort, oldFrame.Value.TimeStamp));
                             RTCPFeedback nack = new RTCPFeedback(localVideoSsrc, remoteVideoSsrc, RTCPFeedbackTypesEnum.NACK, start, (ushort)blp);
                             _pc.SendRtcpFeedback(SDPMediaTypesEnum.video, nack);
                         }
@@ -331,12 +520,15 @@ namespace SIPSorcery.net.AL
                         {
                             var localVideoSsrc = _pc.VideoLocalTrack.Ssrc;
                             var remoteVideoSsrc = _pc.VideoRemoteTrack.Ssrc;
+                            result.Add(new NackRequest(sort, oldFrame.Value.TimeStamp));
                             RTCPFeedback nack = new RTCPFeedback(localVideoSsrc, remoteVideoSsrc, RTCPFeedbackTypesEnum.NACK, start, (ushort)blp);
                             _pc.SendRtcpFeedback(SDPMediaTypesEnum.video, nack);
                         }
                     }
                 }
             }
+
+            return result;
         }
 
         private int GetBlp(ushort[] sort)
@@ -360,7 +552,6 @@ namespace SIPSorcery.net.AL
             int rateTime = 0;
             while (!_isDisposed)
             {
-                var startTime = DateTime.Now;
                 lock (_frames)
                 {
                     if (_frames.Count == 0)
@@ -376,7 +567,8 @@ namespace SIPSorcery.net.AL
 
                     var timeMs = synkTime + rateTime * spleepTime;
 
-                    if (TimeFToMillsec(minPacket.TimeStamp) < timeMs - _latencyMs)
+                    //if (TimeFToMillsec(minPacket.TimeStamp) < timeMs - _latencyMs)
+                    if (TimeFToMillsec(minPacket.TimeStamp) < _currentTime - _latencyMs)
                     {
                         var packetsToSend = minPacket.GetArrayToSend();
 
@@ -384,16 +576,8 @@ namespace SIPSorcery.net.AL
                         {
                             foreach (var packet in packetsToSend)
                             {
-                                var data = packet.GetBytes();
-                                //_udpClient.Send(data, data.Length, "127.0.0.1", _gstPort);
-                                try 
-                                {
-                                    _sendFrameAction?.Invoke(data, 96, (int)_clockRate, _codec == VideoCodecsEnum.H265 ? 265 : 264);
-                                }
-                                catch (Exception ex)
-                                {
-                                    _sendLog?.Invoke("Send frame action error");
-                                }
+                                SendFrame(packet);
+                                
                                 
                             }
                         }
@@ -404,7 +588,7 @@ namespace SIPSorcery.net.AL
 
                         if (minPacket.PreviousFrame == null)
                         {
-                            _sendLog?.Invoke($"Previous Packet NULL for frame {minPacket.FrameId}");
+                            //_sendLog?.Invoke($"Previous Packet NULL for frame {minPacket.FrameId}");
                         }
                         else if (minPacket.FrameId - minPacket.PreviousFrame.FrameId > 1)
                         {
@@ -428,6 +612,21 @@ namespace SIPSorcery.net.AL
                     synkTime = _currentTime;
                     rateTime = 0;
                 }
+            }
+        }
+
+        private void SendFrame(RTPPacket packet)
+        {
+            var data = packet.GetBytes();
+            //_udpClient.Send(data, data.Length, "127.0.0.1", _gstPort);
+            try
+            {
+
+                _sendFrameAction?.Invoke(data, 96, (int)_clockRate, _codec == VideoCodecsEnum.H265 ? 265 : 264);
+            }
+            catch (Exception ex)
+            {
+                _sendLog?.Invoke("Send frame action error");
             }
         }
 
