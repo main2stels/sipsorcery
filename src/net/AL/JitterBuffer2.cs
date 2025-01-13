@@ -147,6 +147,11 @@ namespace SIPSorcery.net.AL
 
             var lat = (int)timeMs - packetTime;
 
+            if(lat < 0)
+            {
+                _sendLog?.Invoke($"lat < 0 {lat}");
+            }
+
             if(CheckMinTimeStamp(lat, p.Header.Timestamp, timeNow))
             {
                 _time = (p.Header.Timestamp, DateTime.UtcNow);
@@ -188,7 +193,7 @@ namespace SIPSorcery.net.AL
                     }
 
                     SetLatencyMs(_latencyMs + (uint)(_latencyMs * coef));
-                    _sendLog?.Invoke($"Up latency time {_latencyMs} isNack: {isNack}");
+                    //_sendLog?.Invoke($"Up latency time {_latencyMs} isNack: {isNack}");
 
                     SendFrame(p);
 
@@ -198,7 +203,7 @@ namespace SIPSorcery.net.AL
                 if(lat > _latencyMs - _latencyMs * 0.15f)
                 {
                     SetLatencyMs(_latencyMs + (uint)(_latencyMs * 0.01f));
-                    _sendLog?.Invoke($"Up latency time {_latencyMs}");
+                    //_sendLog?.Invoke($"Up latency time {_latencyMs}");
                     _framesOverLatency = 0;
                 }
             }
@@ -215,7 +220,7 @@ namespace SIPSorcery.net.AL
                 
 
                 _framesOverLatency = 30;
-                _sendLog?.Invoke($"Down latency time {_latencyMs}");
+                //_sendLog?.Invoke($"Down latency time {_latencyMs}");
             }
 
             _averageTimeEstimator.InsertPacket(p, timeMs);
@@ -328,7 +333,7 @@ namespace SIPSorcery.net.AL
                     _checkMinTimeStampCount = 0;
 
                     var minLat = _checkMinTimeStamp.Min(x => x.Item1);
-                    _sendLog?.Invoke($"min latency: {minLat}");
+                    //_sendLog?.Invoke($"min latency: {minLat}");
 
                     if(minLat > 20)
                     {
@@ -447,10 +452,10 @@ namespace SIPSorcery.net.AL
                 {
                     if (nackPackets.Count > 0)
                     {
-                        //Console.Write($"Nack send: {oldFrame.Value.FrameId} id.");
+                        Console.Write($"Nack send: {oldFrame.Value.FrameId} id.");
                         foreach (var packet in nackPackets)
                         {
-                            //Console.Write($"{packet}, ");
+                            Console.Write($"{packet}, ");
                         }
 
                         var sort = nackPackets.OrderBy(x => x, new SeqIdComparer()).ToArray();
@@ -464,7 +469,7 @@ namespace SIPSorcery.net.AL
                         int blp = GetBlp(sort);
 
 
-                        //_sendLog?.Invoke($"blp: {blp}");
+                        _sendLog?.Invoke($"blp: {blp}");
 
                         if (IsSendNack)
                         {

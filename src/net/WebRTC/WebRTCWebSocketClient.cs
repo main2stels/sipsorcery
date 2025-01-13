@@ -166,7 +166,6 @@ namespace SIPSorcery.Net
                 }
 
                 SendRequest(token.Token);
-                
             }
             else
             {
@@ -197,10 +196,20 @@ namespace SIPSorcery.Net
                     var jsonMsg = Encoding.UTF8.GetString(buffer, 0, posn);
                     string jsonResp = await OnMessage(jsonMsg, pc, ws);
 
-                    if (jsonResp != null)
+                    //LogWarning($"send to ws {jsonResp}");
+                    try
                     {
-                        await ws.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(jsonResp)), WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+                        if (jsonResp != null)
+                        {
+                            await ws.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(jsonResp)), WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+                        }
                     }
+                    catch (Exception ex)
+                    {
+                        LogWarning($"ex {ex.Message} {ex.StackTrace}");
+                    }
+
+                    //LogWarning($"send to ws finish");
                 }
 
                 posn = 0;
@@ -265,12 +274,13 @@ namespace SIPSorcery.Net
                 var result = pc.setRemoteDescription(descriptionInit);
                 if (result != SetDescriptionResultEnum.OK)
                 {
-                    LogWarning($"Failed to set remote description, {result}.");
+                    LogWarning($"Failed to set remote description, {result}. {jsonStr}");
                     pc.Close("failed to set remote description");
                 }
 
                 if (descriptionInit.type == RTCSdpType.offer)
                 {
+                    //LogWarning("!!!!!!!!!!! receive offer");
                     var answerSdp = pc.createAnswer(null);
                     await pc.setLocalDescription(answerSdp).ConfigureAwait(false);
 
@@ -306,6 +316,22 @@ namespace SIPSorcery.Net
         {
             logger.LogWarning(msg);
             _logMp?.Invoke(msg);
+        }
+
+        public void Disposed()
+        {
+            _readTaskCancellationToken?.Cancel();
+
+            var cancellation = new CancellationTokenSource();
+
+            try
+            {
+                _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, null, cancellation.Token);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"ex: {ex}");
+            }
         }
     }
 }
